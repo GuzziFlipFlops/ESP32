@@ -1,0 +1,30 @@
+menu "Walkie Talkie Configuration"
+
+choice WALKIE_BOARD_ROLE
+    prompt "Board role / pinout"
+    default WALKIE_BOARD_BLACK
+    help
+        Select the physical unit you are building for. The black and grey
+        walkies have slightly different GPIO wiring and battery smoothing.
+
+    config WALKIE_BOARD_BLACK
+        bool "Black walkie"
+
+    config WALKIE_BOARD_GREY
+        bool "Grey walkie"
+endchoice
+
+config WALKIE_BLACK_MAC
+    string "Black walkie Wi-Fi MAC"
+    default "A4:F0:0F:66:D2:D0"
+
+config WALKIE_GREY_MAC
+    string "Grey walkie Wi-Fi MAC"
+    default "A4:F0:0F:67:BA:1C"
+
+config WALKIE_RF_CHANNEL
+    int "ESP-NOW RF channel"
+    range 1 13
+    default 6
+
+endmenu

@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "walkie_audio.c"
+        "walkie_display.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        app_update
+        bootloader_support
+        esp_adc
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_i2s
+        esp_event
+        heap
+        esp_phy
+        esp_netif
+        esp_timer
+        esp_wifi
+        nvs_flash
+)
