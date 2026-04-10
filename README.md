@@ -4,7 +4,7 @@
 
 # ESP32 ESP-NOW Walkie Talkies
 
-Open-source ESP32 walkie talkies built from hacked toy walkie-talkie shells, I2S audio hardware, OLED screens, reclaimed lithium batteries, and custom ESP-IDF firmware. This repository is intended to include everything needed to study, modify, rebuild, and improve the project: firmware, wiring documentation, bill of materials, photos, and CAD/enclosure files.
+Open-source ESP32 walkie talkies built into custom 3D-printed casings with I2S audio hardware, OLED screens, reclaimed lithium batteries, and custom ESP-IDF firmware. This repository is intended to include everything needed to study, modify, rebuild, and improve the project: firmware, wiring documentation, bill of materials, photos, and CAD/enclosure files.
 
 The project is licensed under the [MIT License](LICENSE), so you can use the code and hardware documentation for your own builds, school projects, experiments, or upgraded versions. The folder [`Walkie Talkie CAD files`](Walkie%20Talkie%20CAD%20files/) is reserved for open-source CAD models, enclosure modifications, brackets, mounts, and printable parts.
 
@@ -32,7 +32,7 @@ The current build uses an ESP32-U style board with an external antenna, a small 
 
 Even though the main feature is voice communication, this project is also a handheld ESP32 Wi-Fi controller platform. Because each unit has buttons, a display, audio, battery power, ESP-NOW, and normal Wi-Fi capability, the same hardware can be reused to control other Wi-Fi or IoT projects.
 
-Future uses could include controlling RC cars, robots, lights, remote sensors, or any custom ESP32/IoT device that accepts ESP-NOW, Wi-Fi UDP/TCP, MQTT, HTTP, or another wireless command protocol. The walkie shell becomes more like a rugged handheld controller with a built-in voice channel.
+Future uses could include controlling RC cars, robots, lights, remote sensors, or any custom ESP32/IoT device that accepts ESP-NOW, Wi-Fi UDP/TCP, MQTT, HTTP, or another wireless command protocol. The walkie casing becomes more like a rugged handheld controller with a built-in voice channel.
 
 <p align="center">
   <img src="Assets/readme/both-walkies-second.jpg" alt="Second side-by-side photo of both ESP32 walkie talkies" width="900">
@@ -40,7 +40,7 @@ Future uses could include controlling RC cars, robots, lights, remote sensors, o
 
 ## Walkie Talkie Components
 
-The project keeps the toy-walkie form factor, but the original internals were replaced with an ESP32-based digital audio system.
+The project uses a custom 3D-printed walkie-talkie casing built around an ESP32-based digital audio system.
 
 <p align="center">
   <img src="Assets/readme/grey-walkie-only.jpg" alt="Grey ESP32 walkie talkie" width="420">
@@ -53,12 +53,12 @@ The project keeps the toy-walkie form factor, but the original internals were re
 - SSD1306-style OLED display for the full GUI.
 - I2S digital microphone for voice input.
 - I2S speaker output feeding a MAX9875A-style speaker amplifier.
-- Small speaker inside the original walkie shell.
+- Small speaker inside the 3D-printed casing.
 - Potentiometer for analog volume control.
 - Reclaimed 3.85 V nominal lithium battery pack rated around 2000 mAh.
-- GPIO buttons for PTT, OK/select, navigation, back, and apps/settings.
+- Six GPIO push buttons for PTT, OK/select, navigation, back, and apps/settings.
 - LED used as a transmit/status/light output.
-- Laser module used as a manual output and as part of the lights app.
+- 3.3 V laser module used as a manual output and as part of the lights app.
 - Voltage divider into an ADC pin for battery measurement.
 
 Important battery note: the prototype batteries were found in a discarded vape on the ground and reused for this build. That is part of the project history, but it is not a safety recommendation. If you build your own, use a known-good lithium cell with a protection circuit, proper charging hardware, insulation, strain relief, and a safe enclosure. Do not reuse unknown, punctured, swollen, or damaged lithium cells.
@@ -86,7 +86,7 @@ The high-level circuit diagram shows how the ESP32 connects to the display, I2S 
 | OK button | GPIO0 | Active low |
 | Bottom-left button | GPIO14 | Active low |
 | Bottom-right button | GPIO15 | Active low |
-| Laser | GPIO21 | Output |
+| Laser | GPIO21 | 3.3 V laser module output |
 | Volume potentiometer | GPIO34 | ADC input |
 | Battery divider | GPIO35 | ADC input |
 
@@ -124,7 +124,7 @@ The cleaner wiring also matters for audio. Digital microphones, I2S speaker sign
   <img src="Assets/readme/black-walkie-internal.jpg" alt="Black walkie internal circuitry" width="900">
 </p>
 
-The black walkie is the first ESP32 iteration. It works, but the internal wiring uses much thicker wires and is more congested inside the shell. This made the build harder to close, harder to inspect, and harder to modify later.
+The black walkie is the first ESP32 iteration. It works, but the internal wiring uses much thicker wires and is more congested inside the casing. This made the build harder to close, harder to inspect, and harder to modify later.
 
 The black unit also revealed why the firmware needs board profiles. Its PTT and LED pins are swapped compared with the grey unit, and the top-left/top-right buttons are swapped too. Instead of rewiring both units to be identical, the firmware supports both physical layouts.
 
@@ -140,13 +140,36 @@ The project then moved to an ESP32 with an external antenna. That change helped 
 
 The firmware is an ESP-IDF project designed for the Espressif VS Code extension and command-line `idf.py`.
 
+### Firmware Showcase
+
+The firmware turns the 3D-printed handheld into more than a simple radio. It is a menu-driven ESP32 device with voice, controls, telemetry, lights, and room for future Wi-Fi apps.
+
+Current firmware features:
+
+- 20 logical walkie-talkie channels, selected from the main PTT screen.
+- Push-to-talk ESP-NOW voice mode with channel-matched audio packets.
+- Link detection with heartbeat packets and an RSSI-based signal meter.
+- Six physical push buttons per walkie: PTT, OK/select, top-left, top-right, bottom-left, and bottom-right.
+- Apps menu with `TX WIFI`, `RX WIFI`, `TEXT`, `BUTTON CTRL`, `LIGHTS`, and `KID MODE`.
+- Settings menu for audio limiting, low-battery limiting, speaker boost, mic boost, mic cut, flash usage, memory usage, and CPU overlay.
+- Light playground for experimenting with the LED and 3.3 V laser module through strobe, target, rate, constant-on, and preset pattern modes.
+- Kid mode that locks the device to one channel until OK is held for 2 seconds.
+
+Planned or experimental firmware ideas:
+
+- RC car control mode using the walkie buttons as a handheld controller over ESP-NOW or Wi-Fi.
+- Wi-Fi talk mode where a walkie can connect to a normal Wi-Fi network instead of only peer-to-peer ESP-NOW.
+- TX-to-computer mode for sending microphone audio or control packets from the walkie to a computer.
+- RX-from-computer mode for receiving audio, commands, or messages from a computer and playing/showing them on the walkie.
+- More IoT control modes for lights, robots, sensors, and other ESP32 projects.
+
 ### User Interface
 
 - Main PTT screen with device name, battery icon, voltage, channel number, link state, volume, laser state, signal meter, RX activity, and PTT activity.
-- Channel display formatted as `< CH XX >` to show that top-left/top-right can change channels.
+- Channel display formatted as `< CH XX >` to show that top-left/top-right can change through the 20 logical channels.
 - Apps menu with `TX WIFI`, `RX WIFI`, `TEXT`, `BUTTON CTRL`, `LIGHTS`, and `KID MODE`.
 - Settings page with audio limiting, low-battery limiting, speaker boost, mic boost, mic cut, flash usage, memory usage, and CPU overlay.
-- Lights app with strobe, target selection, rate, constant LED, constant laser, and preset patterns.
+- Lights app/light playground with strobe, target selection, rate, constant LED, constant 3.3 V laser, and preset patterns.
 - Kid mode locked to channel 1, with OK held for 2 seconds to exit.
 
 ### Radio and Link System
@@ -323,7 +346,7 @@ Estimated runtime from a 2000 mAh cell:
 | Heavy audio and frequent transmit | 5 to 8 hours |
 | Near worst-case continuous high draw | 4 to 6 hours |
 
-If the system uses a linear regulator from 5 V down to 3.3 V, the regulator wastes the voltage difference as heat. At 250 mA, the regulator dissipates about `(5.0 V - 3.3 V) * 0.25 A = 0.425 W`. At 350 mA, it dissipates about `0.595 W`. That can become warm in a small plastic enclosure, so a buck regulator would be more efficient for long battery life.
+If the system uses a linear regulator from 5 V down to 3.3 V, the regulator wastes the voltage difference as heat. At 250 mA, the regulator dissipates about `(5.0 V - 3.3 V) * 0.25 A = 0.425 W`. At 350 mA, it dissipates about `0.595 W`. That can become warm in a small 3D-printed casing, so a buck regulator would be more efficient for long battery life.
 
 Approximate subsystem draw:
 
@@ -337,32 +360,32 @@ Approximate subsystem draw:
 
 | Qty | Part | Notes |
 | ---: | --- | --- |
-| 2 | Toy walkie-talkie shells | Original bodies reused as the enclosure |
+| 2 | 3D-printed walkie-talkie casings | Main enclosure for each handheld unit |
 | 2 | ESP32-U style development boards | External antenna version recommended |
 | 2 | 2.4 GHz external antennas | Improves range when mounted well |
 | 2 | SSD1306 OLED displays | I2C, connected to GPIO18/GPIO19 |
 | 2 | I2S microphones | L/R tied to GND for left-channel capture |
 | 2 | MAX9875A-style speaker amplifier modules | I2S/audio output amplifier stage |
-| 2 | Small speakers | Fit inside the original walkie shell |
+| 2 | Small speakers | Fit inside the 3D-printed casing |
 | 2 | Potentiometers | Analog volume control |
 | 2 | 3.85 V nominal lithium batteries | Prototype used reclaimed 2000 mAh vape cells |
 | 2 | TP4056 lithium charging/protection boards | Strongly recommended; use protected OUT+/OUT- style modules if possible |
 | 2 | 5 V boost converter modules | Boosts the battery output to 5 V for ESP32 VIN/5V and speaker amp power |
-| 2 | Power switches/buttons | Placed between TP4056 output positive and boost converter VCC |
+| 2 | Main power switches/buttons | Placed between TP4056 output positive and boost converter VCC; separate from the six UI push buttons |
 | 2 | LEDs | PTT/status/lights output |
-| 2 | Laser modules | Manual and lights-app output |
-| 10+ | Momentary buttons | Reuse original buttons or replace as needed |
+| 2 | 3.3 V laser modules | Manual and lights-app output |
+| 12 | Momentary push buttons | Six per walkie: PTT, OK, top-left, top-right, bottom-left, bottom-right |
 | 4 | Battery divider resistors | Black: 100k/100k, grey: 220k/220k |
-| 1 set | Thin silicone wire | Thin wire is much easier to route inside the shell |
+| 1 set | Thin silicone wire | Thin wire is much easier to route inside the casing |
 | 1 set | Heat-shrink tubing/tape | Insulation and strain relief |
 | 1 set | Solder, flux, tools | Assembly and debugging |
 | optional | 3D printed brackets or mounts | Place in `Walkie Talkie CAD files` |
 
 ## Assembly Process
 
-Start by soldering all of the electronic components outside the walkie-talkie casing. Use wires long enough that each module can reach its final position inside the shell without pulling on the solder joints. Thin flexible wire makes the final assembly much easier, especially around the ESP32, OLED, buttons, speaker, and battery.
+Start by soldering all of the electronic components outside the walkie-talkie casing. Use wires long enough that each module can reach its final position inside the casing without pulling on the solder joints. Thin flexible wire makes the final assembly much easier, especially around the ESP32, OLED, buttons, speaker, and battery.
 
-Before permanently placing parts, test-fit everything in the casing. The inside of the toy walkie shell is tight, so it helps to route wires before taping, gluing, or screwing modules down.
+Before permanently placing parts, test-fit everything in the casing. The inside of the 3D-printed walkie casing is tight, so it helps to route wires before taping, gluing, or screwing modules down.
 
 ### Power Wiring
 
@@ -381,9 +404,9 @@ Do not connect the boost converter 5 V output to the ESP32 `3V3` pin. Use the ES
 
 1. Insert the TP4056 charging board into its slot first.
 2. After the components are soldered, place the ESP32 underneath the charging board, next to the battery.
-3. Put the buttons into their original slots in the casing.
+3. Put the six push buttons into their printed slots in the casing.
 4. Place the LED next to the PTT button where the small LED hole is located.
-5. Place the laser module in the laser hole.
+5. Place the 3.3 V laser module in the laser hole.
 6. Place the potentiometer in the potentiometer hole.
 7. Make sure the external antenna is connected to the ESP32 antenna connector.
 8. Route the antenna into the antenna hole to the right of the potentiometer.
