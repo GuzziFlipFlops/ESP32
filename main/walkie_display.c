@@ -730,19 +730,37 @@ static const char *setting_name(int index)
         return "FLASH";
     case SET_MEMORY_USAGE:
         return "MEMORY";
-    default:
+    case SET_CPU_OVERLAY:
         return "SHOW CPU IN PTT";
+    case SET_FIRMWARE_VERSION:
+        return "FW VERSION";
+    case SET_LOG_DUMP:
+        return "DUMP LOGS";
+    default:
+        return "UNKNOWN";
     }
 }
 
 /**
  * Return whether a settings row is an on/off toggle.
  *
- * Flash and memory rows are read-only resource displays, so they return false.
+ * Resource, version, and log-dump rows are not boolean settings, so they return
+ * false and render either detail text or an action hint.
  */
 static bool setting_is_toggle(int index)
 {
-    return index != SET_FLASH_USAGE && index != SET_MEMORY_USAGE;
+    return index != SET_FLASH_USAGE &&
+           index != SET_MEMORY_USAGE &&
+           index != SET_FIRMWARE_VERSION &&
+           index != SET_LOG_DUMP;
+}
+
+/**
+ * Return whether pressing OK performs a one-shot action on this settings row.
+ */
+static bool setting_is_action(int index)
+{
+    return index == SET_LOG_DUMP;
 }
 
 /**
@@ -805,6 +823,12 @@ static void setting_detail_text(const walkie_extra_state_t *extra, int index, ch
     case SET_MEMORY_USAGE:
         format_usage_text(extra->memory_used_bytes, extra->memory_total_bytes, buffer, buffer_len);
         break;
+    case SET_FIRMWARE_VERSION:
+        snprintf(buffer, buffer_len, "V%s", WALKIE_FIRMWARE_VERSION);
+        break;
+    case SET_LOG_DUMP:
+        snprintf(buffer, buffer_len, "PTT+BL BOOT");
+        break;
     default:
         buffer[0] = '\0';
         break;
@@ -854,11 +878,12 @@ static void draw_settings_screen(walkie_display_t *display, const walkie_ui_snap
     char line2[18];
     char detail[18];
     const bool is_toggle = setting_is_toggle(snapshot->extra.settings_index);
+    const bool is_action = setting_is_action(snapshot->extra.settings_index);
     const char *state_text = is_toggle &&
                                      setting_state(&snapshot->extra, snapshot->extra.settings_index)
                                  ? "ON"
                                  : "OFF";
-    const char *right_hint = is_toggle ? "OK" : "";
+    const char *right_hint = is_action ? "DUMP" : (is_toggle ? "OK" : "");
 
     memset(line1, 0, sizeof(line1));
     memset(line2, 0, sizeof(line2));

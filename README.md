@@ -8,7 +8,7 @@ Open-source ESP32 walkie talkies built into custom 3D-printed casings with I2S a
 
 The project is licensed under the [MIT License](LICENSE), so you can use the code and hardware documentation for your own builds, school projects, experiments, or upgraded versions. The folder [`Walkie Talkie CAD files`](Walkie%20Talkie%20CAD%20files/) is reserved for open-source CAD models, enclosure modifications, brackets, mounts, and printable parts.
 
-The original source photos are kept in [`Assets`](Assets/). The README uses optimized JPEG copies in [`Assets/readme`](Assets/readme/) so the photos display reliably on GitHub.
+The original source photos are kept in [`Assets`](Assets/). The README uses optimized JPEG copies in [`Assets/readme`](Assets/readme/) for the large build photos, and references the real OLED GUI PNG screenshots directly from [`Assets`](Assets/).
 
 ## Project Overview
 
@@ -24,6 +24,8 @@ The current build uses an ESP32-U style board with an external antenna, a small 
 - Designed for up to about 1 mile line-of-sight range under ideal outdoor conditions, with real range depending heavily on antenna placement, interference, obstacles, body blocking, and battery voltage.
 - 16 kHz mono voice capture with IMA ADPCM compression so each 20 ms audio frame fits in one ESP-NOW packet.
 - Jitter buffering and packet-loss concealment to make received voice less choppy when packets arrive unevenly.
+- Adaptive weak-link redundancy that sends duplicate audio packets when range gets rough, then de-duplicates them on receive.
+- Onboard flash range logging with JSON telemetry, so range tests can be recorded without a computer connected in the field.
 - OLED interface with channel, link, signal meter, battery, volume, RX/PTT indicators, app menu, settings, lights controls, and kid mode.
 - Separate black and grey walkie profiles because the two physical builds have slightly different GPIO wiring.
 - MIT-licensed firmware and documentation so the project can be forked, improved, and rebuilt.
@@ -136,6 +138,14 @@ The first approach used a Raspberry Pi Pico with an NRF24L01 radio module. That 
 
 The project then moved to an ESP32 with an external antenna. That change helped a lot because ESP32 has strong documentation, built-in Wi-Fi radio hardware, ESP-NOW support, mature ESP-IDF tooling, and standard I2S peripherals for both microphone input and speaker output. Moving from MicroPython to compiled ESP-IDF firmware also made the system faster and gave more control over timing, buffering, compression, and GPIO behavior.
 
+## Range Resilience and Field Diagnostics
+
+The firmware is built to be tested outdoors, not just on a desk. When the walkies get far enough apart that packets start dropping, the radio layer can automatically send one duplicate copy of each audio frame. Both copies use the same sequence number, so the receiver plays whichever copy arrives first and ignores the duplicate instead of stuttering.
+
+The receiver also tracks missing sequence numbers. Very short gaps are filled with packet-loss concealment audio so the speaker fades through the missing frame instead of clicking or abruptly cutting out. Longer fades still sound bad, but the onboard log makes them measurable instead of mysterious.
+
+Every second, the walkie records a compact JSON telemetry line with RSSI, link quality, jitter-buffer depth, duplicate packets, missing-packet concealment, send failures, and wrong-channel/peer rejects. These lines are printed over USB when connected and saved to onboard flash when the walkie is out in the field. After a range test, hold `PTT + bottom-left` during startup to dump the stored `range.jsonl` data over serial.
+
 ## Firmware Features
 
 The firmware is an ESP-IDF project designed for the Espressif VS Code extension and command-line `idf.py`.
@@ -144,14 +154,18 @@ The firmware is an ESP-IDF project designed for the Espressif VS Code extension 
 
 The firmware turns the 3D-printed handheld into more than a simple radio. It is a menu-driven ESP32 device with voice, controls, telemetry, lights, and room for future Wi-Fi apps.
 
+Current firmware version: `0.5.4`.
+
 Current firmware features:
 
 - 20 logical walkie-talkie channels, selected from the main PTT screen.
 - Push-to-talk ESP-NOW voice mode with channel-matched audio packets.
 - Link detection with heartbeat packets and an RSSI-based signal meter.
+- Adaptive weak-link redundancy that sends an extra copy of each audio frame when the link quality is low or unknown.
 - Six physical push buttons per walkie: PTT, OK/select, top-left, top-right, bottom-left, and bottom-right.
 - Apps menu with `TX WIFI`, `RX WIFI`, `TEXT`, `BUTTON CTRL`, `LIGHTS`, and `KID MODE`.
 - Settings menu for audio limiting, low-battery limiting, speaker boost, mic boost, mic cut, flash usage, memory usage, and CPU overlay.
+- Settings rows for firmware version display and onboard log dumping.
 - Light playground for experimenting with the LED and 3.3 V laser module through strobe, target, rate, constant-on, and preset pattern modes.
 - Kid mode that locks the device to one channel until OK is held for 2 seconds.
 
@@ -168,9 +182,29 @@ Planned or experimental firmware ideas:
 - Main PTT screen with device name, battery icon, voltage, channel number, link state, volume, laser state, signal meter, RX activity, and PTT activity.
 - Channel display formatted as `< CH XX >` to show that top-left/top-right can change through the 20 logical channels.
 - Apps menu with `TX WIFI`, `RX WIFI`, `TEXT`, `BUTTON CTRL`, `LIGHTS`, and `KID MODE`.
-- Settings page with audio limiting, low-battery limiting, speaker boost, mic boost, mic cut, flash usage, memory usage, and CPU overlay.
+- Settings page with audio limiting, low-battery limiting, speaker boost, mic boost, mic cut, flash usage, memory usage, CPU overlay, firmware version, and log dump.
 - Lights app/light playground with strobe, target selection, rate, constant LED, constant 3.3 V laser, and preset patterns.
 - Kid mode locked to channel 1, with OK held for 2 seconds to exit.
+
+The screenshots below are from the real walkie-talkie OLED, not the simulator. They show the current firmware UI running on the hardware.
+
+<p align="center">
+  <img src="Assets/PTT%20home%20screen%20GUI.png" alt="Real OLED PTT home screen GUI" width="420">
+  <img src="Assets/SCANNING%20CHANNEL%20GUI.png" alt="Real OLED scanning channel GUI" width="420">
+</p>
+
+<p align="center">
+  <em>Main PTT home screen with channel/link status, and the channel scanning screen used to find active peers.</em>
+</p>
+
+<p align="center">
+  <img src="Assets/Increase%20MIC%20sense%20settings%20GUI.png" alt="Real OLED increase mic sensitivity settings GUI" width="420">
+  <img src="Assets/LIGHT%20STROBE%20GUI.png" alt="Real OLED light strobe app GUI" width="420">
+</p>
+
+<p align="center">
+  <em>Settings menu with mic sensitivity enabled, and the light playground strobe screen for LED/laser effects.</em>
+</p>
 
 ### Radio and Link System
 
@@ -180,9 +214,59 @@ Planned or experimental firmware ideas:
 - Sends heartbeat packets so the UI can show `LINK ON` or `LINK OFF`.
 - Reads RSSI from received ESP-NOW metadata when available.
 - Smooths RSSI into a signal-quality percentage for the left-side signal meter.
+- Sends duplicate audio packets with the same sequence number when the link is weak, giving the receiver a second chance to receive a frame before playback needs it.
+- De-duplicates repeated sequence numbers on receive so redundancy does not play the same 20 ms audio frame twice.
 - Requests maximum ESP32 Wi-Fi transmit power with `esp_wifi_set_max_tx_power(84)`.
 - Disables Wi-Fi power saving for more consistent latency.
 - Configures the ESP-NOW peer for ESP32 long-range PHY rate when supported by the IDF and hardware.
+
+### Range Debug Logging
+
+The firmware creates one JSON-line telemetry record per second. Each record is printed over USB serial when connected and also saved into an onboard flash log, so the walkie can collect range-test data while it is far away from the computer.
+
+The onboard log lives in a dedicated `fieldlog` SPIFFS partition. It stores `range.jsonl` plus one rotated previous file, giving roughly 512 KB of flash-backed range telemetry storage. The firmware rotates the current file before it fills the partition.
+
+Example record:
+
+```json
+{"event":"radio_stats","t_ms":123456,"board":"BLACK","ch":1,"ptt":false,"link":true,"rssi_dbm":-82,"quality_pct":21,"jitter_frames":3,"vol_pct":50,"tx_audio":0,"tx_audio_dup":0,"tx_ctrl":2,"tx_no_mem":0,"tx_fail":0,"rx_audio":48,"rx_audio_dup":7,"rx_audio_old":0,"rx_plc":2,"rx_ctrl":1,"rx_wrong_peer":0,"rx_bad_proto":0,"rx_wrong_channel":0}
+```
+
+Useful fields:
+
+- `rssi_dbm` and `quality_pct` show how strong the peer signal is.
+- `jitter_frames` shows how many decoded frames are waiting for speaker playback.
+- `tx_audio_dup` shows how many redundant audio packets were sent.
+- `rx_audio_dup` shows duplicate packets that were received and safely ignored.
+- `rx_plc` shows how many packet-loss concealment frames were generated because audio packets were still missing.
+- `tx_no_mem` and `tx_fail` show whether ESP-NOW had trouble queueing or sending packets.
+- `rx_wrong_channel`, `rx_bad_proto`, and `rx_wrong_peer` help diagnose configuration or interference problems.
+
+To capture live serial logs when a computer is connected:
+
+```powershell
+idf.py -p COM6 monitor | Tee-Object range-test.jsonl
+```
+
+To dump the onboard flash log later:
+
+1. Connect the walkie to USB.
+2. Hold `PTT` and `bottom-left`.
+3. Reset or power-cycle the walkie while still holding those two buttons.
+4. Open the serial monitor and save the output.
+
+The dump begins with `field_log_dump_begin`, prints the stored `radio_stats` JSON lines, and ends with `field_log_dump_end`. The OK button is intentionally not used for the boot gesture because OK is on GPIO0, which is also an ESP32 boot strap pin.
+
+You can also dump logs while the firmware is already running:
+
+1. Connect the walkie to USB serial.
+2. Open `APPS` then `SETTINGS`.
+3. Scroll to `DUMP LOGS`.
+4. Press `OK`; the firmware prints the stored log immediately over serial.
+
+The `FW VERSION` settings row shows the currently flashed firmware version, currently `V0.5.4`.
+
+Both walkies should run firmware with the de-duplication logic before testing weak-link redundancy. If only one unit is updated, the older receiver may treat duplicate audio packets as real repeated audio.
 
 ### Audio Transport
 
@@ -245,6 +329,7 @@ The firmware includes several processing steps to make ESP-NOW voice more unders
 | `main/walkie_display.h` | Display API |
 | `main/walkie_types.h` | Shared board, UI, settings, lights, and snapshot structures |
 | `main/Kconfig.projbuild` | Menuconfig options for black/grey board profiles, MAC addresses, and RF channel |
+| `partitions.csv` | Custom ESP-IDF partition table with the app partition and 512 KB onboard `fieldlog` SPIFFS log storage |
 | `sdkconfig.defaults` | Default ESP-IDF project settings |
 | `CMakeLists.txt` | Top-level ESP-IDF project definition |
 
@@ -310,9 +395,9 @@ The firmware targets the ESP32 at 240 MHz with 4 MB flash. A recent build of thi
 
 | Resource | Approximate usage |
 | --- | ---: |
-| Firmware app image | 817 KB |
-| App partition used | 53 percent |
-| App partition free | 719 KB |
+| Firmware app image | 827 KiB |
+| App partition used | 55 percent |
+| App partition free | 673 KiB |
 | Flash code | 590 KB |
 | Flash data | 119 KB |
 | Static DRAM | 43 KB |

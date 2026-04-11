@@ -15,6 +15,8 @@ extern "C" {
  * the main state lock or touching hardware state directly.
  */
 
+#define WALKIE_FIRMWARE_VERSION "0.5.4"
+
 typedef enum {
     MODE_PTT = 0,
     MODE_APPS,
@@ -43,6 +45,8 @@ typedef enum {
     SET_FLASH_USAGE,
     SET_MEMORY_USAGE,
     SET_CPU_OVERLAY,
+    SET_FIRMWARE_VERSION,
+    SET_LOG_DUMP,
     SETTING_COUNT,
 } walkie_setting_id_t;
 

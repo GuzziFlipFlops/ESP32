@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -17,6 +18,7 @@
 #include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -77,8 +79,8 @@ static const char *TAG = "walkie";
 #define AUDIO_PAYLOAD_BYTES (SAMPLES_PER_FRAME / 2)
 #define RADIO_RX_DATA_MAX   250
 
-#define RX_QUEUE_FRAMES   8
-#define RX_PREFILL_FRAMES 3
+#define RX_QUEUE_FRAMES   10
+#define RX_PREFILL_FRAMES 4
 
 #define POT_UPDATE_MS   90
 #define BATT_UPDATE_MS  700
@@ -88,11 +90,34 @@ static const char *TAG = "walkie";
 #define LINK_TIMEOUT_MS 2200
 #define SCAN_WAIT_MS    95
 
+/* The range telemetry cadence. One line per second is frequent enough to show
+ * packet loss trends while keeping serial/flash writes small. */
+#define DEBUG_JSON_STATS_MS 1000
+
+/* Onboard range-test log storage. The partition is mounted at /fieldlog and the
+ * log is JSON Lines so every record can be parsed independently after a test. */
+#define FIELD_LOG_MOUNT_PATH "/fieldlog"
+#define FIELD_LOG_CURRENT_PATH FIELD_LOG_MOUNT_PATH "/range.jsonl"
+#define FIELD_LOG_PREVIOUS_PATH FIELD_LOG_MOUNT_PATH "/range.prev.jsonl"
+
+/* Keep two files under the 512 KB SPIFFS partition: current plus previous. */
+#define FIELD_LOG_MAX_FILE_BYTES (220 * 1024)
+
+/* Flash writes happen from a low-priority task. The control loop only drops a
+ * fixed-size line into this short queue so audio timing is not blocked by flash. */
+#define FIELD_LOG_QUEUE_DEPTH    8
+#define FIELD_LOG_LINE_BYTES     512
+
 /* Range-first ESP-NOW settings. TX power is quarter-dBm; 84 requests the ESP32 max. */
 #define WIFI_MAX_TX_POWER_QDBM 84
 #define LINK_RSSI_UNKNOWN_DBM (-127)
 #define LINK_RSSI_WEAK_DBM    (-92)
 #define LINK_RSSI_STRONG_DBM  (-45)
+
+/* Weak-link redundancy threshold. When the RSSI-derived quality is <= 65%, or
+ * the peer is not linked yet, each 20 ms audio frame is sent twice. */
+#define AUDIO_REDUNDANCY_LINK_QUALITY_PCT 65
+#define AUDIO_REDUNDANCY_EXTRA_COPIES     1
 
 #define TX_PREAMBLE_FRAMES 2
 #define TX_END_FRAMES      2
@@ -104,6 +129,30 @@ static const char *TAG = "walkie";
 #define PKT_SCAN_REQ  0xB2
 #define PKT_SCAN_RESP 0xB3
 #define PROTO_VERSION 0x02
+
+/**
+ * Individual counters included in the once-per-second field-test JSON line.
+ *
+ * These are intentionally event-style counters rather than logs of every packet.
+ * A one-second aggregate is compact enough for flash while still showing whether
+ * long-range jitter is caused by packet loss, duplicate recovery, wrong-channel
+ * traffic, or local ESP-NOW send failures.
+ */
+typedef enum {
+    DBG_TX_AUDIO = 0,
+    DBG_TX_AUDIO_DUP,
+    DBG_TX_CTRL,
+    DBG_TX_NO_MEM,
+    DBG_TX_FAIL,
+    DBG_RX_AUDIO,
+    DBG_RX_AUDIO_DUP,
+    DBG_RX_AUDIO_OLD,
+    DBG_RX_PLC,
+    DBG_RX_CTRL,
+    DBG_RX_WRONG_PEER,
+    DBG_RX_BAD_PROTO,
+    DBG_RX_WRONG_CHANNEL,
+} debug_stat_id_t;
 
 /**
  * Small shared control-packet header.
@@ -185,6 +234,52 @@ typedef struct {
 } jitter_buffer_t;
 
 /**
+ * Per-second radio counters printed as JSON for long-range field testing.
+ *
+ * The counters reset after every debug line, so a saved USB serial log can be
+ * graphed as "what happened during this second" instead of needing post-
+ * processing on lifetime totals.
+ */
+typedef struct {
+    /* Packets this unit tried to send. Duplicates are tracked separately so we
+     * can confirm whether weak-link redundancy actually turned on. */
+    uint32_t tx_audio;
+    uint32_t tx_audio_dup;
+    uint32_t tx_ctrl;
+
+    /* ESP-NOW send-side pressure. NO_MEM means the Wi-Fi/ESP-NOW queue was full;
+     * tx_fail is for other immediate esp_now_send() errors. */
+    uint32_t tx_no_mem;
+    uint32_t tx_fail;
+
+    /* Receive-side audio health. rx_audio is accepted unique audio; duplicate
+     * and old packets are counted but intentionally not played. */
+    uint32_t rx_audio;
+    uint32_t rx_audio_dup;
+    uint32_t rx_audio_old;
+
+    /* Packet-loss concealment frames generated locally to cover missing audio. */
+    uint32_t rx_plc;
+
+    /* Control and reject counters help separate real range loss from wrong peer,
+     * wrong protocol, or wrong logical-channel situations. */
+    uint32_t rx_ctrl;
+    uint32_t rx_wrong_peer;
+    uint32_t rx_bad_proto;
+    uint32_t rx_wrong_channel;
+} radio_debug_stats_t;
+
+/**
+ * Fixed-size queue item for field logging.
+ *
+ * Dynamic allocation in an audio/radio firmware is a tiny gremlin factory, so
+ * log records are copied into fixed buffers and sent to the flash task.
+ */
+typedef struct {
+    char line[FIELD_LOG_LINE_BYTES];
+} field_log_line_t;
+
+/**
  * Mutable application state protected by s_state_lock.
  *
  * Tasks share this struct for UI mode, button levels, logical channel, battery,
@@ -242,6 +337,16 @@ static bool s_adc_ready;
 static bool s_radio_ready;
 static bool s_i2s_tx_ready;
 static bool s_i2s_rx_ready;
+
+/* Debug counters can be touched from several tasks, so they use a tiny spinlock
+ * instead of the larger app-state mutex. They are quick increment-only paths. */
+static portMUX_TYPE s_debug_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+static radio_debug_stats_t s_debug_stats;
+
+/* Flash logging is optional at runtime. If SPIFFS fails to mount, the firmware
+ * still runs normally and keeps serial JSON output. */
+static QueueHandle_t s_field_log_queue;
+static bool s_field_log_ready;
 
 static debounced_button_t s_ok_btn;
 static debounced_button_t s_left_btn;
@@ -460,6 +565,111 @@ static int link_quality_from_rssi(int rssi_dbm)
 
     return ((rssi_dbm - LINK_RSSI_WEAK_DBM) * 100) /
            (LINK_RSSI_STRONG_DBM - LINK_RSSI_WEAK_DBM);
+}
+
+/**
+ * Increment one JSON debug counter from any task.
+ *
+ * ESP-NOW callbacks, radio dispatch, capture, and playback all contribute to
+ * the long-range debug line. A tiny critical section keeps the counters coherent
+ * without taking the larger application mutex.
+ */
+static void debug_stats_inc(debug_stat_id_t id)
+{
+    portENTER_CRITICAL(&s_debug_stats_mux);
+    switch (id) {
+    case DBG_TX_AUDIO:
+        s_debug_stats.tx_audio++;
+        break;
+    case DBG_TX_AUDIO_DUP:
+        s_debug_stats.tx_audio_dup++;
+        break;
+    case DBG_TX_CTRL:
+        s_debug_stats.tx_ctrl++;
+        break;
+    case DBG_TX_NO_MEM:
+        s_debug_stats.tx_no_mem++;
+        break;
+    case DBG_TX_FAIL:
+        s_debug_stats.tx_fail++;
+        break;
+    case DBG_RX_AUDIO:
+        s_debug_stats.rx_audio++;
+        break;
+    case DBG_RX_AUDIO_DUP:
+        s_debug_stats.rx_audio_dup++;
+        break;
+    case DBG_RX_AUDIO_OLD:
+        s_debug_stats.rx_audio_old++;
+        break;
+    case DBG_RX_PLC:
+        s_debug_stats.rx_plc++;
+        break;
+    case DBG_RX_CTRL:
+        s_debug_stats.rx_ctrl++;
+        break;
+    case DBG_RX_WRONG_PEER:
+        s_debug_stats.rx_wrong_peer++;
+        break;
+    case DBG_RX_BAD_PROTO:
+        s_debug_stats.rx_bad_proto++;
+        break;
+    case DBG_RX_WRONG_CHANNEL:
+        s_debug_stats.rx_wrong_channel++;
+        break;
+    }
+    portEXIT_CRITICAL(&s_debug_stats_mux);
+}
+
+/**
+ * Snapshot and clear the current JSON debug counters.
+ */
+static radio_debug_stats_t debug_stats_take_snapshot(void)
+{
+    radio_debug_stats_t snapshot;
+    portENTER_CRITICAL(&s_debug_stats_mux);
+    snapshot = s_debug_stats;
+    memset(&s_debug_stats, 0, sizeof(s_debug_stats));
+    portEXIT_CRITICAL(&s_debug_stats_mux);
+    return snapshot;
+}
+
+/**
+ * Compare two 16-bit audio sequence numbers with wraparound.
+ *
+ * Returns positive when seq is newer than reference, zero for a duplicate, and
+ * negative for an old late packet. This is what lets us transmit redundant
+ * copies without the receiver playing the same 20 ms voice frame twice.
+ */
+static int audio_seq_delta(uint16_t seq, uint16_t reference)
+{
+    uint16_t forward = (uint16_t)(seq - reference);
+    if (forward == 0) {
+        return 0;
+    }
+    if (forward < 0x8000U) {
+        return (int)forward;
+    }
+    return -((int)((uint16_t)(reference - seq)));
+}
+
+/**
+ * Decide whether weak-link redundancy should be enabled for the next TX frame.
+ *
+ * Close-range links keep one packet per frame to preserve airtime. When the
+ * peer is unknown or the smoothed RSSI-derived quality drops, each audio frame
+ * gets one immediate duplicate so the receiver has a second chance before the
+ * 20 ms playback deadline.
+ *
+ * Callers must hold s_state_lock.
+ */
+static int audio_redundancy_extra_copies_locked(TickType_t now_tick)
+{
+    if (!link_is_connected_locked(now_tick) ||
+        s_app.link_quality_pct <= AUDIO_REDUNDANCY_LINK_QUALITY_PCT) {
+        return AUDIO_REDUNDANCY_EXTRA_COPIES;
+    }
+    return 0;
 }
 
 /**
@@ -1006,6 +1216,263 @@ static void jitter_set_started(jitter_buffer_t *buffer, bool started)
 }
 
 /**
+ * Return the size of a file, or 0 when it does not exist.
+ */
+static size_t field_log_file_size(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) == 0 && st.st_size > 0) {
+        return (size_t)st.st_size;
+    }
+    return 0;
+}
+
+/**
+ * Keep the onboard JSONL log bounded.
+ *
+ * SPIFFS handles wear leveling, while this simple two-file rotation keeps field
+ * logs from filling the partition. The dump command prints the previous file
+ * first, then the current file, preserving useful time order.
+ */
+static void field_log_rotate_if_needed(void)
+{
+    /* Rotation is checked before every append. At 1 line/second this is cheap,
+     * and it prevents an all-at-once cleanup pause during a field test. */
+    if (field_log_file_size(FIELD_LOG_CURRENT_PATH) < FIELD_LOG_MAX_FILE_BYTES) {
+        return;
+    }
+
+    /* Keep only one previous file. If rename fails for any reason, deleting the
+     * current file is safer than letting SPIFFS fill and block future logs. */
+    remove(FIELD_LOG_PREVIOUS_PATH);
+    if (rename(FIELD_LOG_CURRENT_PATH, FIELD_LOG_PREVIOUS_PATH) != 0) {
+        remove(FIELD_LOG_CURRENT_PATH);
+    }
+}
+
+/**
+ * Append one JSON line to the SPIFFS-backed field log.
+ */
+static void field_log_write_line(const char *line)
+{
+    if (!s_field_log_ready) {
+        return;
+    }
+
+    field_log_rotate_if_needed();
+
+    /* Open/append/close once per second. That is slower than keeping the file
+     * open, but safer if power is removed during an outdoor range test. */
+    FILE *file = fopen(FIELD_LOG_CURRENT_PATH, "a");
+    if (file == NULL) {
+        return;
+    }
+
+    fputs(line, file);
+    fclose(file);
+}
+
+/**
+ * Queue one JSON line for asynchronous flash logging.
+ *
+ * The control task never writes flash directly. If flash is busy and this queue
+ * fills, the newest line is dropped instead of risking audio timing.
+ */
+static void field_log_enqueue_line(const char *line)
+{
+    if (!s_field_log_ready || s_field_log_queue == NULL) {
+        return;
+    }
+
+    field_log_line_t item = {0};
+    strlcpy(item.line, line, sizeof(item.line));
+
+    /* Non-blocking by design: if the flash writer falls behind, audio and radio
+     * continue and this one telemetry sample is simply not persisted. */
+    (void)xQueueSend(s_field_log_queue, &item, 0);
+}
+
+/**
+ * Low-priority task that performs actual SPIFFS appends.
+ */
+static void field_log_task(void *arg)
+{
+    (void)arg;
+    field_log_line_t item;
+
+    while (1) {
+        if (xQueueReceive(s_field_log_queue, &item, portMAX_DELAY) == pdTRUE) {
+            field_log_write_line(item.line);
+        }
+    }
+}
+
+/**
+ * Mount the onboard SPIFFS partition used for range-test logs.
+ */
+static esp_err_t field_log_init(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = FIELD_LOG_MOUNT_PATH,
+        .partition_label = "fieldlog",
+        .max_files = 3,
+
+        /* First boot after flashing a new partition table needs formatting, and
+         * a corrupted log partition should not stop the walkie from booting. */
+        .format_if_mount_failed = true,
+    };
+
+    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "field log mount failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t total = 0;
+    size_t used = 0;
+    err = esp_spiffs_info("fieldlog", &total, &used);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "field log SPIFFS: %u/%u bytes used", (unsigned)used, (unsigned)total);
+    }
+
+    s_field_log_queue = xQueueCreate(FIELD_LOG_QUEUE_DEPTH, sizeof(field_log_line_t));
+    if (s_field_log_queue == NULL) {
+        ESP_LOGW(TAG, "field log queue alloc failed");
+        esp_vfs_spiffs_unregister("fieldlog");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_field_log_ready = true;
+    return ESP_OK;
+}
+
+/**
+ * Print one stored JSONL file to USB serial.
+ */
+static void field_log_dump_file(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return;
+    }
+
+    char line[FIELD_LOG_LINE_BYTES];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        fputs(line, stdout);
+    }
+    fclose(file);
+}
+
+/**
+ * Dump onboard range logs over USB serial for later extraction.
+ */
+static void field_log_dump_over_serial(void)
+{
+    if (!s_field_log_ready) {
+        printf("{\"event\":\"field_log_unavailable\"}\n");
+        fflush(stdout);
+        return;
+    }
+
+    /* Markers let a script extract exactly the stored field-test records from a
+     * normal ESP-IDF monitor stream that also contains boot logs. */
+    printf("{\"event\":\"field_log_dump_begin\",\"current_bytes\":%u,\"previous_bytes\":%u}\n",
+           (unsigned)field_log_file_size(FIELD_LOG_CURRENT_PATH),
+           (unsigned)field_log_file_size(FIELD_LOG_PREVIOUS_PATH));
+    field_log_dump_file(FIELD_LOG_PREVIOUS_PATH);
+    field_log_dump_file(FIELD_LOG_CURRENT_PATH);
+    printf("{\"event\":\"field_log_dump_end\"}\n");
+    fflush(stdout);
+}
+
+/**
+ * Dump stored field logs when the user intentionally holds PTT + bottom-left.
+ *
+ * GPIO0 is the OK button and also an ESP32 boot strap, so the dump gesture avoids
+ * OK. Hold PTT plus bottom-left while the firmware starts, then capture the USB
+ * serial output.
+ */
+static void field_log_dump_if_requested(void)
+{
+    if (gpio_get_level(s_board.ptt_pin) == 0 && gpio_get_level(BOT_LEFT_PIN) == 0) {
+        ESP_LOGI(TAG, "PTT + bottom-left held: dumping onboard field log");
+        field_log_dump_over_serial();
+    }
+}
+
+/**
+ * Emit one JSON-line telemetry record over USB serial.
+ *
+ * Use `idf.py monitor | tee range-test.jsonl` while walking away from the other
+ * radio. Each line is standalone JSON, making it easy to filter or plot packet
+ * loss, duplicates, jitter depth, RSSI, and send errors after a range test.
+ */
+static void debug_emit_json_line(TickType_t now_tick)
+{
+    radio_debug_stats_t stats = debug_stats_take_snapshot();
+    char line[FIELD_LOG_LINE_BYTES];
+    int jitter_depth = jitter_count(&s_jitter);
+    const char *board_label;
+    bool ptt_down;
+    bool link_on;
+    int channel;
+    int quality;
+    int rssi;
+    int volume;
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    board_label = s_board.label;
+    ptt_down = s_app.ptt_down;
+    link_on = link_is_connected_locked(now_tick);
+    channel = s_app.current_channel;
+    quality = s_app.link_quality_pct;
+    rssi = link_on ? s_app.link_rssi_dbm : LINK_RSSI_UNKNOWN_DBM;
+    volume = s_app.extra.eff_vol_percent;
+    xSemaphoreGive(s_state_lock);
+
+    /* One line contains the full one-second aggregate. Keeping it as a single
+     * JSON object makes the onboard file robust if extraction starts mid-log. */
+    snprintf(line, sizeof(line),
+             "{\"event\":\"radio_stats\",\"t_ms\":%" PRId64
+             ",\"board\":\"%s\",\"ch\":%d,\"ptt\":%s,\"link\":%s"
+             ",\"rssi_dbm\":%d,\"quality_pct\":%d,\"jitter_frames\":%d"
+             ",\"vol_pct\":%d,\"tx_audio\":%" PRIu32 ",\"tx_audio_dup\":%" PRIu32
+             ",\"tx_ctrl\":%" PRIu32 ",\"tx_no_mem\":%" PRIu32 ",\"tx_fail\":%" PRIu32
+             ",\"rx_audio\":%" PRIu32 ",\"rx_audio_dup\":%" PRIu32
+             ",\"rx_audio_old\":%" PRIu32 ",\"rx_plc\":%" PRIu32
+             ",\"rx_ctrl\":%" PRIu32 ",\"rx_wrong_peer\":%" PRIu32
+             ",\"rx_bad_proto\":%" PRIu32 ",\"rx_wrong_channel\":%" PRIu32 "}\n",
+             esp_timer_get_time() / 1000,
+             board_label ? board_label : "?",
+             channel,
+             ptt_down ? "true" : "false",
+             link_on ? "true" : "false",
+             rssi,
+             quality,
+             jitter_depth,
+             volume,
+             stats.tx_audio,
+             stats.tx_audio_dup,
+             stats.tx_ctrl,
+             stats.tx_no_mem,
+             stats.tx_fail,
+             stats.rx_audio,
+             stats.rx_audio_dup,
+             stats.rx_audio_old,
+             stats.rx_plc,
+             stats.rx_ctrl,
+             stats.rx_wrong_peer,
+             stats.rx_bad_proto,
+             stats.rx_wrong_channel);
+
+    /* Serial output is still useful at the bench; flash persistence is what lets
+     * the same record survive real long-distance testing without a computer. */
+    fputs(line, stdout);
+    fflush(stdout);
+    field_log_enqueue_line(line);
+}
+
+/**
  * Try to allocate and configure one TX/RX I2S port pairing.
  *
  * ESP32 has two I2S peripherals. Speaker output and microphone input need
@@ -1216,16 +1683,23 @@ static esp_err_t espnow_init_peer(void)
  * Transient ESP_ERR_ESPNOW_NO_MEM is ignored because voice sends again every
  * 20 ms; other errors are logged so radio problems are visible during debugging.
  */
-static void send_packet_raw(const void *packet, size_t len)
+static bool send_packet_raw(const void *packet, size_t len)
 {
     if (!s_radio_ready) {
-        return;
+        return false;
     }
 
     esp_err_t err = esp_now_send(s_board.peer_mac, packet, len);
-    if (err != ESP_OK && err != ESP_ERR_ESPNOW_NO_MEM) {
-        ESP_LOGW(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
+    if (err == ESP_ERR_ESPNOW_NO_MEM) {
+        debug_stats_inc(DBG_TX_NO_MEM);
+        return false;
     }
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_NO_MEM) {
+        debug_stats_inc(DBG_TX_FAIL);
+        ESP_LOGW(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -1244,6 +1718,7 @@ static void send_ctrl_packet(uint8_t type, uint8_t logical_channel, uint8_t flag
         .flags = flags,
         .seq = seq,
     };
+    debug_stats_inc(DBG_TX_CTRL);
     send_packet_raw(&packet, sizeof(packet));
 }
 
@@ -1252,13 +1727,15 @@ static void send_ctrl_packet(uint8_t type, uint8_t logical_channel, uint8_t flag
  *
  * IMA ADPCM packs two 16-bit PCM samples into one byte. The packet also carries
  * the encoder predictor/step state so the receiver can decode each frame even
- * after a short packet loss.
+ * after a short packet loss. extra_copies sends duplicate packets with the same
+ * sequence number for weak links; the receiver de-duplicates them.
  */
 static void send_audio_pcm_frame(const int16_t *pcm,
                                  uint8_t logical_channel,
                                  uint8_t flags,
                                  uint16_t seq,
-                                 walkie_adpcm_state_t *codec_state)
+                                 walkie_adpcm_state_t *codec_state,
+                                 int extra_copies)
 {
     walkie_audio_packet_t packet = {0};
     packet.type = PKT_AUDIO;
@@ -1270,7 +1747,16 @@ static void send_audio_pcm_frame(const int16_t *pcm,
     packet.step_index = codec_state->step_index;
     packet.sample_count = SAMPLES_PER_FRAME;
     walkie_adpcm_encode_frame(pcm, SAMPLES_PER_FRAME, codec_state, packet.payload);
+
+    /* Count the unique frame once, then count every redundant copy separately.
+     * The duplicate uses the exact same seq/payload so the receiver can accept
+     * whichever copy arrives first and discard the rest. */
+    debug_stats_inc(DBG_TX_AUDIO);
     send_packet_raw(&packet, sizeof(packet));
+    for (int copy = 0; copy < extra_copies; ++copy) {
+        debug_stats_inc(DBG_TX_AUDIO_DUP);
+        send_packet_raw(&packet, sizeof(packet));
+    }
 }
 
 /**
@@ -1337,18 +1823,38 @@ static void handle_decoded_audio_packet(const walkie_audio_packet_t *packet, Tic
     jitter_get_status(&s_jitter, NULL, &have_last_good, &last_seq, &have_last_seq, NULL, last_good);
 
     if (have_last_seq) {
-        uint16_t gap = (uint16_t)(packet->seq - last_seq);
+        int gap = audio_seq_delta(packet->seq, last_seq);
+        if (gap == 0) {
+            /* This is the expected path for redundancy: the first copy already
+             * made it into the jitter buffer, so later copies update link RSSI
+             * but do not play again. */
+            debug_stats_inc(DBG_RX_AUDIO_DUP);
+            state_set_link_seen(now_tick, rssi);
+            return;
+        }
+        if (gap < 0) {
+            /* A very delayed packet would sound like a time-travel click. Count
+             * it for diagnosis and keep playback moving forward. */
+            debug_stats_inc(DBG_RX_AUDIO_OLD);
+            state_set_link_seen(now_tick, rssi);
+            return;
+        }
         if (gap > 1 && gap < 4 && have_last_good) {
-            for (uint16_t loss = 1; loss < gap; ++loss) {
+            /* For short gaps, insert synthetic fade frames before the real one.
+             * Longer gaps are left as silence by playback_task() to avoid huge
+             * latency jumps after a bad RF fade. */
+            for (int loss = 1; loss < gap; ++loss) {
                 int16_t plc[SAMPLES_PER_FRAME];
                 walkie_generate_plc_frame(last_good, plc, SAMPLES_PER_FRAME, loss);
                 jitter_push_frame(&s_jitter, plc, (uint16_t)(last_seq + loss), now_tick);
+                debug_stats_inc(DBG_RX_PLC);
             }
         }
     }
 
     walkie_adpcm_decode_frame(packet->payload, SAMPLES_PER_FRAME, &decode_state, frame);
     jitter_push_frame(&s_jitter, frame, packet->seq, now_tick);
+    debug_stats_inc(DBG_RX_AUDIO);
     state_set_link_seen(now_tick, rssi);
 }
 
@@ -1380,20 +1886,29 @@ static bool packet_matches_current_comm(uint8_t logical_channel, uint8_t flags)
  */
 static bool handle_radio_item(const radio_rx_item_t *item, TickType_t now_tick, bool allow_audio)
 {
-    uint8_t type = item->data[0];
-
-    if (memcmp(item->src_mac, s_board.peer_mac, sizeof(s_board.peer_mac)) != 0 || item->len < sizeof(walkie_ctrl_packet_t)) {
+    if (item->len < sizeof(walkie_ctrl_packet_t)) {
+        debug_stats_inc(DBG_RX_BAD_PROTO);
         return false;
     }
 
+    if (memcmp(item->src_mac, s_board.peer_mac, sizeof(s_board.peer_mac)) != 0) {
+        debug_stats_inc(DBG_RX_WRONG_PEER);
+        return false;
+    }
+
+    uint8_t type = item->data[0];
     if (item->data[1] != PROTO_VERSION) {
+        debug_stats_inc(DBG_RX_BAD_PROTO);
         return false;
     }
 
     if (type == PKT_HEART) {
         const walkie_ctrl_packet_t *packet = (const walkie_ctrl_packet_t *)item->data;
         if (packet_matches_current_comm(packet->logical_channel, packet->flags)) {
+            debug_stats_inc(DBG_RX_CTRL);
             state_set_link_seen(now_tick, item->rssi);
+        } else {
+            debug_stats_inc(DBG_RX_WRONG_CHANNEL);
         }
         return false;
     }
@@ -1401,7 +1916,10 @@ static bool handle_radio_item(const radio_rx_item_t *item, TickType_t now_tick, 
     if (type == PKT_SCAN_REQ) {
         const walkie_ctrl_packet_t *packet = (const walkie_ctrl_packet_t *)item->data;
         if (packet_matches_current_comm(packet->logical_channel, packet->flags)) {
+            debug_stats_inc(DBG_RX_CTRL);
             send_ctrl_packet(PKT_SCAN_RESP, packet->logical_channel, packet->flags, packet->seq);
+        } else {
+            debug_stats_inc(DBG_RX_WRONG_CHANNEL);
         }
         return false;
     }
@@ -1409,7 +1927,10 @@ static bool handle_radio_item(const radio_rx_item_t *item, TickType_t now_tick, 
     if (type == PKT_SCAN_RESP) {
         const walkie_ctrl_packet_t *packet = (const walkie_ctrl_packet_t *)item->data;
         if (packet_matches_current_comm(packet->logical_channel, packet->flags)) {
+            debug_stats_inc(DBG_RX_CTRL);
             state_set_link_seen(now_tick, item->rssi);
+        } else {
+            debug_stats_inc(DBG_RX_WRONG_CHANNEL);
         }
         return true;
     }
@@ -1418,6 +1939,8 @@ static bool handle_radio_item(const radio_rx_item_t *item, TickType_t now_tick, 
         const walkie_audio_packet_t *packet = (const walkie_audio_packet_t *)item->data;
         if (packet_matches_current_comm(packet->logical_channel, packet->flags)) {
             handle_decoded_audio_packet(packet, now_tick, item->rssi);
+        } else {
+            debug_stats_inc(DBG_RX_WRONG_CHANNEL);
         }
     }
 
@@ -1448,8 +1971,9 @@ static void settings_move_down_locked(void)
 /**
  * Toggle the currently selected setting.
  *
- * Mic boost and mic cut are mutually exclusive. Display-only resource rows do
- * nothing when OK is pressed.
+ * Mic boost and mic cut are mutually exclusive. Display-only resource/version
+ * rows do nothing when OK is pressed. The log dump row is handled by
+ * control_task() outside the state lock because it prints a lot of serial data.
  *
  * Callers must hold s_state_lock.
  */
@@ -1482,6 +2006,8 @@ static void toggle_setting_locked(void)
         break;
     case SET_FLASH_USAGE:
     case SET_MEMORY_USAGE:
+    case SET_FIRMWARE_VERSION:
+    case SET_LOG_DUMP:
     default:
         break;
     }
@@ -1831,11 +2357,12 @@ static void send_transition_silence(uint8_t logical_channel,
                                     uint8_t flags,
                                     uint16_t *seq,
                                     walkie_adpcm_state_t *codec_state,
-                                    int frames)
+                                    int frames,
+                                    int extra_copies)
 {
     int16_t silence[SAMPLES_PER_FRAME] = {0};
     for (int i = 0; i < frames; ++i) {
-        send_audio_pcm_frame(silence, logical_channel, flags, *seq, codec_state);
+        send_audio_pcm_frame(silence, logical_channel, flags, *seq, codec_state, extra_copies);
         (*seq)++;
     }
 }
@@ -1856,6 +2383,12 @@ static void capture_task(void *arg)
     walkie_adpcm_state_t codec_state;
     uint16_t seq = 0;
     bool was_talking = false;
+    uint8_t last_tx_channel = LOGICAL_CHANNEL_MIN;
+    uint8_t last_tx_flags = 0;
+
+    /* The end-of-PTT silence is sent after s_app.ptt_down has gone false, so the
+     * task remembers the last active channel/flags/redundancy choice. */
+    int last_tx_extra_copies = 0;
 
     walkie_mic_proc_reset(&mic_state);
     walkie_adpcm_reset(&codec_state);
@@ -1874,6 +2407,8 @@ static void capture_task(void *arg)
         uint8_t flags = 0;
         int mic_mode = 0;
         int mic_gain_q10 = 1024;
+        int extra_copies = 0;
+        TickType_t now_tick = xTaskGetTickCount();
 
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         talking = ((s_app.ui_mode == MODE_PTT || s_app.ui_mode == MODE_KID) && s_app.ptt_down);
@@ -1881,12 +2416,20 @@ static void capture_task(void *arg)
             active_comm_locked(&logical_channel, &flags);
             mic_mode = s_app.extra.mic_manual_mode;
             mic_gain_q10 = s_app.extra.mic_gain_q10;
+
+            /* Redundancy is selected per frame from current link quality. At
+             * long range this usually becomes 1 extra copy; close range stays
+             * lean at one packet per 20 ms frame. */
+            extra_copies = audio_redundancy_extra_copies_locked(now_tick);
+            last_tx_channel = logical_channel;
+            last_tx_flags = flags;
+            last_tx_extra_copies = extra_copies;
         }
         xSemaphoreGive(s_state_lock);
 
         if (!talking) {
             if (was_talking) {
-                send_transition_silence(logical_channel, flags, &seq, &codec_state, TX_END_FRAMES);
+                send_transition_silence(last_tx_channel, last_tx_flags, &seq, &codec_state, TX_END_FRAMES, last_tx_extra_copies);
                 walkie_mic_proc_reset(&mic_state);
                 walkie_adpcm_reset(&codec_state);
             }
@@ -1903,11 +2446,13 @@ static void capture_task(void *arg)
             walkie_mic_proc_reset(&mic_state);
             walkie_adpcm_reset(&codec_state);
 
+            /* Some I2S microphones produce unstable first samples after capture
+             * starts. Discarding a couple of frames avoids sending that glitch. */
             for (int i = 0; i < MIC_WARMUP_FRAMES; ++i) {
                 (void)i2s_channel_read(s_i2s_rx, raw_i2s, sizeof(raw_i2s), &warmup_bytes, pdMS_TO_TICKS(FRAME_MS));
             }
 
-            send_transition_silence(logical_channel, flags, &seq, &codec_state, TX_PREAMBLE_FRAMES);
+            send_transition_silence(logical_channel, flags, &seq, &codec_state, TX_PREAMBLE_FRAMES, extra_copies);
             was_talking = true;
         }
 
@@ -1919,7 +2464,7 @@ static void capture_task(void *arg)
         }
 
         walkie_process_mic_frame(raw_i2s, pcm, SAMPLES_PER_FRAME, &mic_state, mic_mode, mic_gain_q10);
-        send_audio_pcm_frame(pcm, logical_channel, flags, seq, &codec_state);
+        send_audio_pcm_frame(pcm, logical_channel, flags, seq, &codec_state, extra_copies);
         seq++;
     }
 }
@@ -2018,6 +2563,7 @@ static void control_task(void *arg)
 {
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
+    TickType_t last_debug_tick = 0;
 
     while (1) {
         int64_t now_ms = esp_timer_get_time() / 1000;
@@ -2028,6 +2574,7 @@ static void control_task(void *arg)
         bool bl_evt = button_pressed(&s_bl_btn, now_ms);
         bool br_evt = button_pressed(&s_br_btn, now_ms);
         bool do_scan = false;
+        bool do_log_dump = false;
         bool reset_rx = false;
         bool animate_apps = false;
         int anim_old = 0;
@@ -2101,7 +2648,14 @@ static void control_task(void *arg)
             }
         } else if (s_app.ui_mode == MODE_SETTINGS) {
             if (ok_evt) {
-                toggle_setting_locked();
+                if (s_app.extra.settings_index == SET_LOG_DUMP) {
+                    /* Dumping the onboard JSONL log can take a while, so only
+                     * set a flag while holding the state lock. The actual serial
+                     * dump happens below after the UI state is released. */
+                    do_log_dump = true;
+                } else {
+                    toggle_setting_locked();
+                }
             }
             if (tl_evt) {
                 settings_move_up_locked();
@@ -2174,6 +2728,10 @@ static void control_task(void *arg)
             drain_radio_rx_queue();
         }
 
+        if (do_log_dump) {
+            field_log_dump_over_serial();
+        }
+
         if (animate_apps && walkie_display_ready(&s_display)) {
             walkie_ui_snapshot_t snapshot;
             xSemaphoreTake(s_state_lock, portMAX_DELAY);
@@ -2208,6 +2766,13 @@ static void control_task(void *arg)
 
         if (should_redraw) {
             walkie_display_redraw(&s_display, &snapshot);
+        }
+
+        /* One aggregate telemetry sample per second. This path only formats and
+         * queues the log line; the flash write happens in field_log_task(). */
+        if ((now_tick - last_debug_tick) >= pdMS_TO_TICKS(DEBUG_JSON_STATS_MS)) {
+            last_debug_tick = now_tick;
+            debug_emit_json_line(now_tick);
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
@@ -2248,6 +2813,12 @@ void app_main(void)
     if (s_jitter.mutex == NULL) {
         ESP_LOGE(TAG, "jitter mutex alloc failed");
         return;
+    }
+
+    /* Mount field-test storage before the rest of the app starts so the boot
+     * gesture can dump stored logs without needing Wi-Fi or I2S to initialize. */
+    if (field_log_init() == ESP_OK) {
+        field_log_dump_if_requested();
     }
 
     esp_err_t adc_err = adc_init_all();
@@ -2302,6 +2873,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Audio RX ready: %s", s_i2s_rx_ready ? "yes" : "no");
 
     xTaskCreatePinnedToCore(control_task, "walkie_control", 8192, NULL, 7, NULL, 1);
+    if (s_field_log_ready && s_field_log_queue != NULL) {
+        /* Low priority: if flash is slow, audio/radio/control work wins. */
+        xTaskCreatePinnedToCore(field_log_task, "walkie_fieldlog", 4096, NULL, 2, NULL, 0);
+    }
     xTaskCreatePinnedToCore(capture_task, "walkie_capture", 8192, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(playback_task, "walkie_playback", 8192, NULL, 5, NULL, 1);
 }

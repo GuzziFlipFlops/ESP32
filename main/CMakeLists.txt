@@ -16,6 +16,7 @@ idf_component_register(
         heap
         esp_phy
         esp_netif
+        spiffs
         esp_timer
         esp_wifi
         nvs_flash
