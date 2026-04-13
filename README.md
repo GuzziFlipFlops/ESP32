@@ -4,11 +4,9 @@
 
 # ESP32 ESP-NOW Walkie Talkies
 
-Open-source ESP32 walkie talkies built into custom 3D-printed casings with I2S audio hardware, OLED screens, reclaimed lithium batteries, and custom ESP-IDF firmware. This repository is intended to include everything needed to study, modify, rebuild, and improve the project: firmware, wiring documentation, bill of materials, photos, and CAD/enclosure files.
+Custom ESP32 walkie talkies built into 3D-printed casings with I2S audio hardware, OLED screens, reclaimed lithium batteries, external antennas, and custom ESP-IDF firmware. This repository is intended to include everything needed to study, modify, rebuild, and improve the project: firmware, wiring documentation, bill of materials, photos, and CAD/enclosure files.
 
-The project is licensed under the [MIT License](LICENSE), so you can use the code and hardware documentation for your own builds, school projects, experiments, or upgraded versions. The folder [`Walkie Talkie CAD files`](Walkie%20Talkie%20CAD%20files/) is reserved for open-source CAD models, enclosure modifications, brackets, mounts, and printable parts.
-
-The original source photos are kept in [`Assets`](Assets/). The README uses optimized JPEG copies in [`Assets/readme`](Assets/readme/) for the large build photos, and references the real OLED GUI PNG screenshots directly from [`Assets`](Assets/).
+The folder [`Walkie Talkie CAD files`](Walkie%20Talkie%20CAD%20files/) is reserved for enclosure models, printable parts, brackets, mounts, and future case revisions, so other builders can reproduce or remix the physical design.
 
 ## Project Overview
 
@@ -28,7 +26,7 @@ The current build uses an ESP32-U style board with an external antenna, a small 
 - Onboard flash range logging with JSON telemetry, so range tests can be recorded without a computer connected in the field.
 - OLED interface with channel, link, signal meter, battery, volume, RX/PTT indicators, app menu, settings, lights controls, and kid mode.
 - Separate black and grey walkie profiles because the two physical builds have slightly different GPIO wiring.
-- MIT-licensed firmware and documentation so the project can be forked, improved, and rebuilt.
+- Firmware, wiring notes, build photos, and CAD documentation organized so the project can be forked, improved, and rebuilt.
 
 ## More Than a Walkie Talkie
 
@@ -518,13 +516,13 @@ Because this is open source, the intended path is:
 
 If your wiring differs, add a new board profile instead of hardcoding changes over the existing black/grey profiles. That keeps the firmware easier for other builders to understand.
 
-## Current Limitations and Future Ideas
+## Future Work
 
-- Source HEIC photos are preserved in `Assets`, while optimized JPEG copies are used for the README.
-- ESP-NOW range is very environment-dependent. The firmware requests long-range settings, but antennas, body position, walls, ground reflections, and interference can dominate real results.
-- Audio is half-duplex in the normal walkie-talkie sense: PTT transmits voice, release receives voice. The ESP32 has separate I2S input and output, so full-duplex experiments are possible, but the radio protocol and UI would need more work to avoid collisions.
-- The apps menu includes some placeholder-style screens that can become real features later.
-- Battery life estimates should be measured with a USB power meter or inline current sensor for the exact hardware.
+- Continue tuning long-range ESP-NOW voice using the onboard field logs, signal meter, redundancy counters, antenna placement, and outdoor range tests.
+- Build the planned RC car control mode so the walkie can act as a handheld ESP32 controller, not just a voice radio.
+- Expand the Wi-Fi app modes for computer audio, remote control, or IoT experiments over normal Wi-Fi networks.
+- Experiment with full-duplex voice later. The ESP32 already has separate I2S microphone and speaker paths, but the radio protocol would need collision handling before both walkies can talk at the same time reliably.
+- Turn the remaining app-menu prototypes into real features such as text messages, button-control packets, and richer Wi-Fi tools.
 
 ## License
 
