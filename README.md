@@ -4,9 +4,6 @@
 
 # ESP32 ESP-NOW Walkie Talkies
 
-Custom ESP32 walkie talkies built into 3D-printed casings with I2S audio hardware, OLED screens, reclaimed lithium batteries, external antennas, and custom ESP-IDF firmware. This repository is intended to include everything needed to study, modify, rebuild, and improve the project: firmware, wiring documentation, bill of materials, photos, and CAD/enclosure files.
-
-The folder [`Walkie Talkie CAD files`](Walkie%20Talkie%20CAD%20files/) is reserved for enclosure models, printable parts, brackets, mounts, and future case revisions, so other builders can reproduce or remix the physical design.
 
 ## Project Overview
 
@@ -61,11 +58,9 @@ The project uses a custom 3D-printed walkie-talkie casing built around an ESP32-
 - 3.3 V laser module used as a manual output and as part of the lights app.
 - Voltage divider into an ADC pin for battery measurement.
 
-Important battery note: the prototype batteries were found in a discarded vape on the ground and reused for this build. That is part of the project history, but it is not a safety recommendation. If you build your own, use a known-good lithium cell with a protection circuit, proper charging hardware, insulation, strain relief, and a safe enclosure. Do not reuse unknown, punctured, swollen, or damaged lithium cells.
 
 ## Circuit Diagram
 
-The high-level circuit diagram shows how the ESP32 connects to the display, I2S audio devices, buttons, analog inputs, LED, laser, and battery measurement circuit.
 
 <p align="center">
   <img src="Assets/Walkie%20Talkie%20Circuit%20Diagram.png" alt="Walkie talkie circuit diagram" width="900">
@@ -150,7 +145,6 @@ The firmware is an ESP-IDF project designed for the Espressif VS Code extension 
 
 ### Firmware Showcase
 
-The firmware turns the 3D-printed handheld into more than a simple radio. It is a menu-driven ESP32 device with voice, controls, telemetry, lights, and room for future Wi-Fi apps.
 
 Current firmware version: `0.5.4`.
 
@@ -167,7 +161,7 @@ Current firmware features:
 - Light playground for experimenting with the LED and 3.3 V laser module through strobe, target, rate, constant-on, and preset pattern modes.
 - Kid mode that locks the device to one channel until OK is held for 2 seconds.
 
-Planned or experimental firmware ideas:
+Planned firmware ideas:
 
 - RC car control mode using the walkie buttons as a handheld controller over ESP-NOW or Wi-Fi.
 - Wi-Fi talk mode where a walkie can connect to a normal Wi-Fi network instead of only peer-to-peer ESP-NOW.
@@ -184,7 +178,6 @@ Planned or experimental firmware ideas:
 - Lights app/light playground with strobe, target selection, rate, constant LED, constant 3.3 V laser, and preset patterns.
 - Kid mode locked to channel 1, with OK held for 2 seconds to exit.
 
-The screenshots below are from the real walkie-talkie OLED, not the simulator. They show the current firmware UI running on the hardware.
 
 <p align="center">
   <img src="Assets/PTT%20home%20screen%20GUI.png" alt="Real OLED PTT home screen GUI" width="420">
@@ -429,7 +422,7 @@ Estimated runtime from a 2000 mAh cell:
 | Heavy audio and frequent transmit | 5 to 8 hours |
 | Near worst-case continuous high draw | 4 to 6 hours |
 
-If the system uses a linear regulator from 5 V down to 3.3 V, the regulator wastes the voltage difference as heat. At 250 mA, the regulator dissipates about `(5.0 V - 3.3 V) * 0.25 A = 0.425 W`. At 350 mA, it dissipates about `0.595 W`. That can become warm in a small 3D-printed casing, so a buck regulator would be more efficient for long battery life.
+The regulator wastes the voltage difference as heat. At 250 mA, the regulator dissipates about `(5.0 V - 3.3 V) * 0.25 A = 0.425 W`. At 350 mA, it dissipates about `0.595 W`. That can become warm in a small 3D-printed casing, so a buck regulator would be more efficient for long battery life.
 
 Approximate subsystem draw:
 
